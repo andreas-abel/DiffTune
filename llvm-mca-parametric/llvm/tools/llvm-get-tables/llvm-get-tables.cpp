@@ -65,13 +65,15 @@ static cl::opt<std::string>
          cl::value_desc("cpu-name"), cl::init("native"));
 
 enum SampleType {
-                 builtin, sample
+                 builtin, sample, simple, simple_mem
 };
 
 cl::opt<SampleType> sampleType(cl::desc("Whether to use builtin or sampled params"),
   cl::values(
     clEnumVal(builtin , "Builtin"),
-    clEnumVal(sample, "Sampled")));
+    clEnumVal(sample, "Sampled"),
+    clEnumVal(simple, "Simple"),
+    clEnumVal(simple_mem, "Simple_mem")));
 
 static cl::opt<int>
     SampleSeed("seed",
@@ -248,6 +250,40 @@ int main(int argc, char **argv) {
 
 
   const MCSchedModel &SM = STI->getSchedModel();
+
+  if (sampleType == simple || sampleType == simple_mem) {
+    std::cout << "dispatch-width " << "4" << std::endl;
+    std::cout << "microop-buffer-size " << "100" << std::endl;
+
+    for (unsigned Opcode = 1; Opcode < MCII->getNumOpcodes(); Opcode++) {
+      const MCInstrDesc &MCDesc = MCII->get(Opcode);
+
+      std::cout << "opcode-name " << MCII->getName(Opcode).data() << std::endl;
+      std::cout << "latency-" << Opcode << "-0 " << "1" << std::endl;
+      std::cout << "microops-" << Opcode << " " << "1" << std::endl;
+
+      for (unsigned I = 1, E = SM.getNumProcResourceKinds(); I < E; ++I) {
+        const MCProcResourceDesc *Desc = SM.getProcResource(I);
+
+        if (sampleType == simple) {
+          std::cout << "port-" << Opcode << "-" << Desc->Name << " " << "0" << std::endl;
+        } else {
+          if (strcmp(Desc->Name, "HWPort23") == 0 && MCDesc.mayLoad()) {
+            std::cout << "port-" << Opcode << "-" << Desc->Name << " " << "1" << std::endl;
+          } else if (strcmp(Desc->Name, "HWPort4") == 0 && MCDesc.mayStore()) {
+            std::cout << "port-" << Opcode << "-" << Desc->Name << " " << "1" << std::endl;
+          } else {
+            std::cout << "port-" << Opcode << "-" << Desc->Name << " " << "0" << std::endl;
+          }
+        }
+      }
+
+      for (unsigned int I = 0; I < 7; I++) {
+        std::cout << "readadvance-" << Opcode << "-" << I << "-0 " << "0" << "\n";
+      }
+    }
+    return 0;
+  }
 
   std::cout << "dispatch-width " << SM.IssueWidth << std::endl;
   std::cout << "microop-buffer-size " << SM.MicroOpBufferSize << std::endl;
