@@ -15,12 +15,10 @@ import re
 import subprocess
 import tempfile
 import time
-import torch
 import tqdm
 import xml.etree.ElementTree as ET
 import numba
 import shutil
-from . import model
 
 _DIRNAME = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
 _PARENT_DIRNAME = os.path.dirname(_DIRNAME)
@@ -680,6 +678,8 @@ class CollateResult:
         return self
 
 def do_collate(batch, defaults=None, instr_params=None, global_params=None, shuffle=False):
+    import torch
+
     assert defaults is not None
 
     instrs = torch.nn.utils.rnn.pad_sequence([
@@ -714,6 +714,9 @@ def do_collate(batch, defaults=None, instr_params=None, global_params=None, shuf
     )
 
 def train_approximation(name, sim, arch, model_name, model_width, model_depth, model_bidirectional, batch_size, max_delta, shuffle, opt_alg, opt_alpha, opt_beta, opt_beta_2, opt_nesterov, device, dataset_sample_size, validate, epochs):
+    import torch
+    from . import model
+
     sample_params = read(name, 'sample-params')
     blocks = read(name, 'blocks').reset_index()
 
@@ -876,6 +879,9 @@ def train_approximation(name, sim, arch, model_name, model_width, model_depth, m
     print(np.mean(all_errs))
 
 def train_parameters(name, sim, arch, model_name, batch_size, shuffle, seed, params_name, opt_alg, opt_alpha, opt_beta, opt_beta_2, opt_nesterov, device, timing_arch, validate, epochs):
+    import torch
+    from . import model
+
     version = 'latest'
 
     sample_params = read(name, 'sample-params')
@@ -1043,6 +1049,8 @@ def train_parameters(name, sim, arch, model_name, batch_size, shuffle, seed, par
                 pbar.set_postfix(loss=current_loss)
 
 def extract_parameters(name, sim, arch, model_name, params_name):
+    import torch
+
     version = 'latest'
 
     sample_params = read(name, 'sample-params')
@@ -1160,6 +1168,114 @@ def validate_parameters(name, sim, arch, model_name, params_name, sample_size):
         res.corr(tru, method='kendall'),
     ))
 
+
+def train_parameters_simple(name, arch):
+    blocks = read(name, 'blocks').reset_index()
+    all_idxs = list(blocks['idx'])
+    np.random.RandomState(0).shuffle(all_idxs)
+    train_idxs = all_idxs[:int(0.8 * len(all_idxs))]
+    val_idxs = all_idxs[int(0.8 * len(all_idxs)):int(0.9 * len(all_idxs))]
+    #test_idxs = all_idxs[int(0.9 * len(all_idxs)):]
+    train_blocks = blocks[blocks['idx'].isin(set(train_idxs))].copy()
+    val_blocks = blocks[blocks['idx'].isin(set(val_idxs))].copy()
+
+    inst_to_idx = {}
+    for idx, mcinsts in train_blocks[['idx', 'mcinsts']].values:
+        for i in mcinsts.split():
+            inst_to_idx.setdefault(i, []).append(idx)
+
+    handle = McaHandle('haswell')
+    pts = ['HWDivider', 'HWFPDivider', 'HWPort0', 'HWPort01', 'HWPort015', 'HWPort0156', 'HWPort04', 'HWPort05', 'HWPort056', 'HWPort06', 'HWPort1', 'HWPort15', 'HWPort16', 'HWPort2', 'HWPort23', 'HWPort237', 'HWPort3', 'HWPort4', 'HWPort5', 'HWPort56', 'HWPort6', 'HWPort7', 'HWPortAny']
+
+    env = {}
+    env['dispatch-width'] = '4'
+    env['microop-buffer-size'] = '100'
+    for opcode in inst_to_idx.keys():
+        env['latency-{}-0'.format(opcode)] = '1'
+        env['microops-{}'.format(opcode)] = '1'
+        for port in pts:
+            env['port-{}-{}'.format(opcode, port)] = '0'
+        for r in range(8):
+            env['readadvance-{}-{}-0'.format(opcode, r)] = '0'
+
+    def eval_blocks(blocks, env):
+        def minize(used_opcodes, env):
+            res = {}
+            def cp(key):
+                if key in env:
+                    res[key] = env[key]
+            cp('dispatch-width')
+            cp('microop-buffer-size')
+            for opcode in used_opcodes:
+                cp('latency-{}-0'.format(opcode))
+                cp('microops-{}'.format(opcode))
+                for port in pts:
+                    cp('port-{}-{}'.format(opcode, port))
+                for j in range(N_READADVANCE_PARAMS):
+                    cp('readadvance-{}-{}-0'.format(opcode, j))
+            return res
+
+        def timeit(b):
+            code, mcinsts = b
+            return handle.get_timing_fast(minize(mcinsts.split(), env), code)
+
+        with mp.Pool() as p:
+            blocks['pred'] = np.array(list(tqdm.tqdm(p.imap(timeit, blocks[['code', 'mcinsts']].values, chunksize=4), total=len(blocks))))
+        return blocks['pred'].copy()
+
+    for i, (opcode, idx_list) in enumerate(inst_to_idx.items()):
+        filtered_blocks = blocks[blocks['idx'].isin(idx_list)][:1000]
+        tru = filtered_blocks['{}-true'.format(long_to_short[arch])]
+
+        best = eval_blocks(filtered_blocks, env)
+        orig_error = ((best - tru) / tru).abs().mean()
+
+        parameters = ['latency-{}-0'.format(opcode)]
+        parameters += ['readadvance-{}-{}-0'.format(opcode, j) for j in range(N_READADVANCE_PARAMS)]
+        parameters += ['microops-{}'.format(opcode)]
+        parameters += ['port-{}-{}'.format(opcode, port) for port in pts]
+
+        for par in parameters:
+            while int(env[par]) <= 9:
+                prev = env[par]
+                env[par] = str(int(prev) + 1)
+                cur = eval_blocks(filtered_blocks, env)
+                print(par + ' ' + env[par] + ' ' + str(((cur - tru) / tru).abs().mean()))
+                if ((cur - tru) / tru).abs().mean() < ((best - tru) / tru).abs().mean():
+                    best = cur
+                else:
+                    env[par] = prev
+                    break
+
+        print(str(i) + '/' + str(len(inst_to_idx)) + ' ' + str(opcode) + ' - ' + str(len(idx_list)) + ' - ' + str(orig_error) + ' - ' + str(((best - tru) / tru).abs().mean()))
+
+    tru = val_blocks['{}-true'.format(long_to_short[arch])]
+    res = eval_blocks(val_blocks, env)
+    print('Error: {}, Corr: {}'.format(
+        ((res - tru) / tru).abs().mean(),
+        res.corr(tru, method='kendall'),
+    ))
+
+    # write parameters to file
+    content = [
+        'dispatch-width {}'.format(env['dispatch-width']),
+        'microop-buffer-size {}'.format(env['microop-buffer-size']),
+    ]
+
+    defaults = read(name, 'default_params')[arch]
+    for opcode in defaults.instruction_table.index:
+        content.append('latency-{}-0 {}'.format(opcode, env.get('latency-{}-0'.format(opcode), '1')))
+        content.append('microops-{} {}'.format(opcode, env.get('microops-{}'.format(opcode), '1')))
+        for port in pts:
+            content.append('port-{}-{} {}'.format(opcode, port, env.get('port-{}-{}'.format(opcode, port), '0')))
+        for j in range(N_READADVANCE_PARAMS):
+            content.append('readadvance-{}-{}-0 {}'.format(opcode, j, env.get('readadvance-{}-{}-0'.format(opcode, j), '0')))
+
+    base_dir = '{}/{}'.format(DATA_BASE, name)
+    with open(os.path.join(base_dir, arch + '_trained_simple'), 'w') as f:
+        f.write('\n'.join(content))
+
+
 def read(name, task):
     base_dir = '{}/{}'.format(DATA_BASE, name)
     os.makedirs(base_dir, exist_ok=True)
@@ -1256,6 +1372,8 @@ def main():
         extract_parameters(args.name, args.sim, args.arch, args.model_name, args.params_name)
     elif args.task == 'validate':
         validate_parameters(args.name, args.sim, args.arch, args.model_name, args.params_name, args.sample_size)
+    elif args.task == 'train_simple':
+        train_parameters_simple(args.name, args.arch)
     else:
         raise ValueError('Unknown task "{}"'.format(args.task))
 

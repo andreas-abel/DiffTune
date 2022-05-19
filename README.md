@@ -1,7 +1,7 @@
 # DiffTune: Optimizing CPU Simulator Parameters with Learned Differentiable Surrogates
 
-DiffTune is a system for learning the parameters of x86 basic block CPU simulators from coarse-grained end-to-end measurements. 
-Given a simulator, DiffTune learns its parameters by first replacing the original simulator with a differentiable surrogate, another function that approximates the original function; by making the surrogate differentiable, DiffTune is then able to apply gradient-based optimization techniques even when the original function is non-differentiable, such as is the case with CPU simulators. 
+DiffTune is a system for learning the parameters of x86 basic block CPU simulators from coarse-grained end-to-end measurements.
+Given a simulator, DiffTune learns its parameters by first replacing the original simulator with a differentiable surrogate, another function that approximates the original function; by making the surrogate differentiable, DiffTune is then able to apply gradient-based optimization techniques even when the original function is non-differentiable, such as is the case with CPU simulators.
 With this differentiable surrogate, DiffTune then applies gradient-based optimization to produce values of the simulator's parameters that minimize the simulator's error on a dataset of ground truth end-to-end performance measurements. Finally, the learned parameters are plugged back into the original simulator.
 
 ## Paper
@@ -32,7 +32,7 @@ Inside of the source directory, run:
 ./build.sh
 ```
 
-Then, to download the preprocessed BHive dataset and the released artifact, run: 
+Then, to download the preprocessed BHive dataset and the released artifact, run:
 ```
 ./download.sh
 ```
@@ -61,8 +61,8 @@ Next, to generate the simulated dataset, run:
 ```
 python -m difftune.runner --name ${name} --task sample_timings --sim mca --arch haswell --n-forks 100
 ```
-This command samples parameter tables and runs them through llvm-mca on Haswell, writing the seed and result to `data/${name}/mca-haswell.csv`. 
-`--n-forks=100` specifies to run 100 sampling workers in parallel, which should be tuned based on compute availability. 
+This command samples parameter tables and runs them through llvm-mca on Haswell, writing the seed and result to `data/${name}/mca-haswell.csv`.
+`--n-forks=100` specifies to run 100 sampling workers in parallel, which should be tuned based on compute availability.
 This command does not ever terminate; when sufficient samples have been collected, just kill it with Ctrl-c, or manually truncate it to the desired length.
 
 With the simulated dataset collected, to train the surrogate, run:
@@ -79,4 +79,21 @@ Finally, to extract the parameter table to a file (`data/${name}/surrogate-model
 ```
 python -m difftune.runner --name ${name} --task extract --sim mca --arch haswell --model-name surrogate
 python -m difftune.runner --name ${name} --task validate --sim mca --arch haswell --model-name surrogate
+```
+
+## Simple Parameter Set
+
+```
+./build.sh
+build/bin/llvm-get-tables -mtriple=x86_64-unknown-unknown -march=x86-64 -mcpu=haswell -simple > simple
+```
+
+## Simple Learning Approach
+
+Inside the docker container run:
+```
+python3 -m difftune.runner --name artifacts --task train_simple --arch ivybridge
+python3 -m difftune.runner --name artifacts --task train_simple --arch haswell
+python3 -m difftune.runner --name artifacts --task train_simple --arch skylake
+python3 -m difftune.runner --name artifacts --task train_simple --arch znver1
 ```
